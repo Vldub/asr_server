@@ -1,0 +1,13 @@
+# WebSocket client
+websockets>=12.0
+
+# Audio processing
+numpy>=1.24.0
+soundfile>=0.12.0
+
+# Microphone support (optional)
+pyaudio>=0.2.14; sys_platform != "win32"
+pyaudio-win; sys_platform == "win32"
+
+
+
