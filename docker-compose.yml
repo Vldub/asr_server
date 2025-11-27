@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  streaming-asr-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streaming-asr-server
+    
+    shm_size: 64g
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - PYTHONPATH=/app
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+    
+    volumes:
+      - /home/vlad/train_nemo/stt_en_fastconformer_hybrid_large_streaming_multi/stt_en_fastconformer_hybrid_large_streaming_multi.nemo:/app/model.nemo:ro
+      - ~/.cache:/root/.cache
+    
+    ports:
+      - "6009:6009"
+    
+    command: python server.py --model /app/model.nemo --port 6009 --host 0.0.0.0 --device 0
+
+
+

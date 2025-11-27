@@ -1,0 +1,15 @@
+# Web Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+
+# NeMo ASR (устанавливается через контейнер)
+# nemo-toolkit[asr]>=2.5.3
+
+# Data Processing
+numpy>=1.24.0
+torch>=2.3.0
+omegaconf>=2.3.0
+
+
+
