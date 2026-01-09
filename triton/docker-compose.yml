@@ -49,36 +49,27 @@ services:
     
     restart: unless-stopped
 
-  # CPU версия (без GPU)
+  # CPU версия (без GPU) - кастомный образ с NeMo
   triton-server-cpu:
-    image: nvcr.io/nvidia/tritonserver:24.07-py3
+    build:
+      context: .
+      dockerfile: Dockerfile.server
     container_name: triton-asr-server-cpu
     
     shm_size: 8g
     
+    network_mode: host
+    
     volumes:
-      - ./model_repository:/models
       - /home/vlad/nemo/kazakh_russian_clean_1024_new_wer_17.nemo:/models/model.nemo:ro
       - ~/.cache:/root/.cache
-    
-    ports:
-      - "8000:8000"
-      - "8001:8001"
-      - "8002:8002"
-    
-    command: >
-      tritonserver 
-      --model-repository=/models
-      --strict-model-config=false
-      --log-verbose=1
-      --backend-config=python,shm-default-byte-size=16777216
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s
+      start_period: 300s
     
     profiles:
       - cpu
