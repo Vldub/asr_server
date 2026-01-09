@@ -3,6 +3,10 @@ ASR Engine для онлайн стриминговой транскрипции
 
 Основан на NeMo streaming ASR и подходе pipecat-ai/nemotron.
 Использует cache_state для инкрементальной обработки аудио.
+
+Оптимизации:
+- torch.compile для ускорения инференса (PyTorch 2.0+)
+- FP16 (half precision) через torch.cuda.amp для GPU
 """
 
 import logging
@@ -18,6 +22,9 @@ from scipy import signal as scipy_signal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Проверяем доступность torch.compile (PyTorch 2.0+)
+TORCH_COMPILE_AVAILABLE = hasattr(torch, 'compile') and torch.__version__ >= '2.0'
 
 # Целевой sample rate для модели
 TARGET_SAMPLE_RATE = 16000
@@ -61,6 +68,10 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
 class StreamingASREngine:
     """
     ASR движок с правильной поддержкой стриминга через cache_state.
+    
+    Поддерживает оптимизации:
+    - torch.compile для ускорения инференса
+    - FP16 (AMP) для GPU
     """
     
     def __init__(
@@ -68,7 +79,19 @@ class StreamingASREngine:
         model_path: str,
         device: Optional[torch.device] = None,
         compute_dtype: torch.dtype = torch.float32,
+        use_compile: bool = False,
+        use_amp: bool = False,
     ):
+        """
+        Инициализация ASR движка.
+        
+        Args:
+            model_path: Путь к .nemo модели
+            device: Устройство для инференса (cuda/cpu)
+            compute_dtype: Тип данных для вычислений
+            use_compile: Использовать torch.compile для ускорения (PyTorch 2.0+)
+            use_amp: Использовать Automatic Mixed Precision (FP16) для GPU
+        """
         from omegaconf import OmegaConf
         from nemo.collections.asr.parts.utils.transcribe_utils import setup_model
         
@@ -88,6 +111,46 @@ class StreamingASREngine:
         self.device = device
         self.compute_dtype = compute_dtype
         
+        # AMP настройки (только для CUDA)
+        self.use_amp = use_amp and device.type == 'cuda'
+        if self.use_amp:
+            logger.info("✓ AMP (FP16) включен для GPU")
+        
+        # torch.compile оптимизация (PyTorch 2.0+)
+        self.use_compile = use_compile and TORCH_COMPILE_AVAILABLE
+        if use_compile and not TORCH_COMPILE_AVAILABLE:
+            logger.warning(f"torch.compile недоступен (PyTorch {torch.__version__}), требуется >= 2.0")
+        
+        if self.use_compile:
+            # ВАЖНО: torch.compile НЕ совместим со streaming моделями NeMo!
+            # Компиляция encoder ломает streaming функциональность (conformer_stream_step).
+            # Используйте torch.compile только для batch инференса (не streaming).
+            logger.warning("⚠️ torch.compile НЕ совместим со streaming режимом NeMo!")
+            logger.warning("⚠️ conformer_stream_step может не работать после компиляции.")
+            logger.warning("⚠️ Рекомендуется использовать --use-amp вместо --use-compile для GPU.")
+            
+            logger.info("Компиляция модели с torch.compile (это может занять несколько минут)...")
+            try:
+                # Компилируем только decoder joint, НЕ encoder (encoder ломает streaming)
+                # Компилируем decoder joint network если есть (это безопаснее)
+                if hasattr(self.asr_model, 'decoder') and hasattr(self.asr_model.decoder, 'joint'):
+                    self.asr_model.decoder.joint = torch.compile(
+                        self.asr_model.decoder.joint,
+                        mode="reduce-overhead",
+                        fullgraph=False,
+                    )
+                    logger.info("✓ Decoder joint скомпилирован")
+                else:
+                    logger.warning("Decoder joint не найден, компиляция пропущена")
+                    self.use_compile = False
+                
+                if self.use_compile:
+                    logger.info("✓ Частичная компиляция завершена (только decoder joint)")
+            except Exception as e:
+                logger.warning(f"Не удалось скомпилировать модель: {e}")
+                logger.warning("Продолжаем без torch.compile")
+                self.use_compile = False
+        
         # Получаем sample rate модели
         self.model_sample_rate = TARGET_SAMPLE_RATE
         if hasattr(self.asr_model, 'preprocessor') and hasattr(self.asr_model.preprocessor, 'featurizer'):
@@ -99,7 +162,15 @@ class StreamingASREngine:
         self.sessions: Dict[str, tuple] = {}
         self.lock = threading.Lock()
         
-        logger.info(f"Модель загружена на {device}, готов к обработке сессий")
+        # Логируем итоговую конфигурацию
+        optimizations = []
+        if self.use_compile:
+            optimizations.append("torch.compile")
+        if self.use_amp:
+            optimizations.append("AMP/FP16")
+        opt_str = ", ".join(optimizations) if optimizations else "нет"
+        
+        logger.info(f"Модель загружена на {device}, оптимизации: {opt_str}")
     
     def _get_initial_cache_state(self) -> dict:
         """Получает начальное состояние кэша для стриминга."""
@@ -220,32 +291,34 @@ class StreamingASREngine:
         
         try:
             with torch.inference_mode():
-                # Preprocessor
-                processed_signal, processed_signal_length = self.asr_model.preprocessor(
-                    input_signal=audio_tensor,
-                    length=audio_lengths
-                )
-                
-                # Streaming step с cache_state
-                (
-                    pred_out_stream,
-                    transcribed_texts,
-                    cache_last_channel,
-                    cache_last_time,
-                    cache_last_channel_len,
-                    previous_hypotheses,
-                ) = self.asr_model.conformer_stream_step(
-                    processed_signal=processed_signal,
-                    processed_signal_length=processed_signal_length,
-                    cache_last_channel=cache_state["cache_last_channel"],
-                    cache_last_time=cache_state["cache_last_time"],
-                    cache_last_channel_len=cache_state["cache_last_channel_len"],
-                    keep_all_outputs=True,
-                    previous_hypotheses=cache_state["previous_hypotheses"],
-                    previous_pred_out=cache_state["pred_out_stream"],
-                    drop_extra_pre_encoded=0,
-                    return_transcription=True,
-                )
+                # Используем AMP (autocast) для FP16 если включено
+                with torch.amp.autocast('cuda', enabled=self.use_amp, dtype=torch.float16):
+                    # Preprocessor
+                    processed_signal, processed_signal_length = self.asr_model.preprocessor(
+                        input_signal=audio_tensor,
+                        length=audio_lengths
+                    )
+                    
+                    # Streaming step с cache_state
+                    (
+                        pred_out_stream,
+                        transcribed_texts,
+                        cache_last_channel,
+                        cache_last_time,
+                        cache_last_channel_len,
+                        previous_hypotheses,
+                    ) = self.asr_model.conformer_stream_step(
+                        processed_signal=processed_signal,
+                        processed_signal_length=processed_signal_length,
+                        cache_last_channel=cache_state["cache_last_channel"],
+                        cache_last_time=cache_state["cache_last_time"],
+                        cache_last_channel_len=cache_state["cache_last_channel_len"],
+                        keep_all_outputs=True,
+                        previous_hypotheses=cache_state["previous_hypotheses"],
+                        previous_pred_out=cache_state["pred_out_stream"],
+                        drop_extra_pre_encoded=0,
+                        return_transcription=True,
+                    )
             
             # Обновляем cache_state
             with self.lock:
@@ -359,30 +432,32 @@ class StreamingASREngine:
         
         try:
             with torch.inference_mode():
-                processed_signal, processed_signal_length = self.asr_model.preprocessor(
-                    input_signal=audio_tensor,
-                    length=audio_lengths
-                )
-                
-                (
-                    pred_out_stream,
-                    transcribed_texts,
-                    cache_last_channel,
-                    cache_last_time,
-                    cache_last_channel_len,
-                    previous_hypotheses,
-                ) = self.asr_model.conformer_stream_step(
-                    processed_signal=processed_signal,
-                    processed_signal_length=processed_signal_length,
-                    cache_last_channel=cache_state["cache_last_channel"],
-                    cache_last_time=cache_state["cache_last_time"],
-                    cache_last_channel_len=cache_state["cache_last_channel_len"],
-                    keep_all_outputs=True,
-                    previous_hypotheses=cache_state["previous_hypotheses"],
-                    previous_pred_out=cache_state["pred_out_stream"],
-                    drop_extra_pre_encoded=0,
-                    return_transcription=True,
-                )
+                # Используем AMP (autocast) для FP16 если включено
+                with torch.amp.autocast('cuda', enabled=self.use_amp, dtype=torch.float16):
+                    processed_signal, processed_signal_length = self.asr_model.preprocessor(
+                        input_signal=audio_tensor,
+                        length=audio_lengths
+                    )
+                    
+                    (
+                        pred_out_stream,
+                        transcribed_texts,
+                        cache_last_channel,
+                        cache_last_time,
+                        cache_last_channel_len,
+                        previous_hypotheses,
+                    ) = self.asr_model.conformer_stream_step(
+                        processed_signal=processed_signal,
+                        processed_signal_length=processed_signal_length,
+                        cache_last_channel=cache_state["cache_last_channel"],
+                        cache_last_time=cache_state["cache_last_time"],
+                        cache_last_channel_len=cache_state["cache_last_channel_len"],
+                        keep_all_outputs=True,
+                        previous_hypotheses=cache_state["previous_hypotheses"],
+                        previous_pred_out=cache_state["pred_out_stream"],
+                        drop_extra_pre_encoded=0,
+                        return_transcription=True,
+                    )
             
             with self.lock:
                 if session_id in self.sessions:

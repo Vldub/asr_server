@@ -31,7 +31,9 @@ services:
     
     network_mode: host
     
-    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device 0
+    # Оптимизации: --use-compile (torch.compile), --use-amp (FP16)
+    # Первый запуск с --use-compile будет медленнее из-за компиляции
+    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device 0 --use-amp
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
@@ -60,8 +62,9 @@ services:
     
     network_mode: host
     
-    # --device -1 для CPU, --max-sessions 10, --inactivity-timeout 20
-    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device -1 --max-sessions 10 --inactivity-timeout 20
+    # --device -1 для CPU
+    # Для GPU используйте: --device 0 --use-amp
+    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device -1 --max-sessions 20 --inactivity-timeout 20
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]

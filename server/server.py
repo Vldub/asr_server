@@ -131,14 +131,21 @@ async def lifespan(app: FastAPI):
     device_id = config.get("device", 0)
     device = torch.device(f"cuda:{device_id}" if device_id >= 0 and torch.cuda.is_available() else "cpu")
     
+    # Получаем настройки оптимизации
+    use_compile = config.get("use_compile", False)
+    use_amp = config.get("use_amp", False)
+    
     logger.info(f"Инициализация ASR сервера...")
     logger.info(f"Модель: {config['model']}")
     logger.info(f"Устройство: {device}")
+    logger.info(f"Оптимизации: torch.compile={use_compile}, AMP/FP16={use_amp}")
     
     app.state.asr_engine = StreamingASREngine(
         model_path=config["model"],
         device=device,
         compute_dtype=torch.float32,
+        use_compile=use_compile,
+        use_amp=use_amp,
     )
     
     logger.info("ASR сервер готов!")
@@ -612,11 +619,25 @@ async def get_sessions(request: Request):
     return {"sessions": sessions}
 
 
-def create_app(model_path: str, device: int = 0) -> FastAPI:
-    """Создание приложения с конфигурацией."""
+def create_app(
+    model_path: str, 
+    device: int = 0,
+    use_compile: bool = False,
+    use_amp: bool = False,
+) -> FastAPI:
+    """Создание приложения с конфигурацией.
+    
+    Args:
+        model_path: Путь к .nemo модели
+        device: CUDA устройство (0, 1, ...) или -1 для CPU
+        use_compile: Использовать torch.compile для ускорения
+        use_amp: Использовать AMP (FP16) для GPU
+    """
     app.state.config = {
         "model": model_path,
-        "device": device
+        "device": device,
+        "use_compile": use_compile,
+        "use_amp": use_amp,
     }
     # Устанавливаем lifespan после конфигурации
     app.router.lifespan_context = lifespan
@@ -632,12 +653,21 @@ def main():
     parser.add_argument("--max-sessions", type=int, default=10, help="Максимальное количество одновременных сессий")
     parser.add_argument("--max-chunk-size", type=int, default=262144, help="Максимальный размер аудио чанка в байтах (256KB)")
     parser.add_argument("--inactivity-timeout", type=float, default=5.0, help="Таймаут неактивности транскрипций в секундах")
+    
+    # Оптимизации
+    parser.add_argument("--use-compile", action="store_true", 
+                        help="Использовать torch.compile для ускорения (PyTorch 2.0+, первый запуск медленнее)")
+    parser.add_argument("--use-amp", action="store_true",
+                        help="Использовать AMP (FP16) для GPU (ускорение ~1.5-2x)")
+    
     args = parser.parse_args()
     
     # Конфигурируем приложение
     app.state.config = {
         "model": args.model,
-        "device": args.device
+        "device": args.device,
+        "use_compile": args.use_compile,
+        "use_amp": args.use_amp,
     }
     app.state.rate_limiter = RateLimiter(
         max_sessions=args.max_sessions,
@@ -649,6 +679,7 @@ def main():
     logger.info(f"Запуск WebSocket сервера на {args.host}:{args.port}")
     logger.info(f"Rate limiting: max_sessions={args.max_sessions}, max_chunk_size={args.max_chunk_size}")
     logger.info(f"Inactivity timeout: {args.inactivity_timeout}s")
+    logger.info(f"Оптимизации: torch.compile={args.use_compile}, AMP/FP16={args.use_amp}")
     
     uvicorn.run(
         app,
