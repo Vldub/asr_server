@@ -58,3 +58,18 @@ __pycache__/
 *.bak
 *.swp
 
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+
+# Transcription results
+*_transcription.txt
+microphone_transcription_*.txt
+
+# Terminal logs
+terminals/
+

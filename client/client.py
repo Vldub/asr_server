@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def transcribe_audio_file(server_url: str, audio_file: str, chunk_size_ms: int = 100, output_file: str = None):
+async def transcribe_audio_file(server_url: str, audio_file: str, chunk_size_ms: int = 100, output_file: str = None, realtime: bool = False):
     """Транскрипция аудио файла через стриминг."""
     import soundfile as sf
     
@@ -193,6 +193,9 @@ async def transcribe_audio_file(server_url: str, audio_file: str, chunk_size_ms:
         logger.info("Отправка аудио чанков...")
         total_chunks = (len(audio_data) + chunk_size_samples - 1) // chunk_size_samples
         
+        # Вычисляем задержку для режима реального времени
+        chunk_duration_sec = chunk_size_samples / sample_rate
+        
         for i in range(0, len(audio_data), chunk_size_samples):
             chunk = audio_data[i:i + chunk_size_samples]
             chunk_num = i // chunk_size_samples + 1
@@ -205,9 +208,13 @@ async def transcribe_audio_file(server_url: str, audio_file: str, chunk_size_ms:
             elif chunk_num % 5 == 0:
                 logger.debug(f"Отправлен чанк {chunk_num}/{total_chunks} | Транскрипций: {transcription_count}")
             
-            # Небольшая задержка для предотвращения перегрузки, но не слишком большая
-            # Для файлов отправляем быстрее, чтобы сервер мог накапливать данные
-            await asyncio.sleep(0.01)  # 10ms задержка вместо chunk_size_ms
+            # Задержка между чанками
+            if realtime:
+                # Режим реального времени - задержка 0.1 сек (100мс) между чанками
+                await asyncio.sleep(0.1)
+            else:
+                # Быстрый режим - минимальная задержка
+                await asyncio.sleep(0.01)
         
         logger.info("Все чанки отправлены. Завершение сессии...")
         
@@ -325,8 +332,10 @@ async def transcribe_microphone(server_url: str, sample_rate: int = 16000, chunk
             data = json.loads(response)
             logger.info(f"Сессия создана: {data}")
             
+            stop_recording = False
+            
             async def receive_transcriptions():
-                nonlocal final_transcription
+                nonlocal final_transcription, stop_recording
                 try:
                     async for message in websocket:
                         data = json.loads(message)
@@ -339,33 +348,52 @@ async def transcribe_microphone(server_url: str, sample_rate: int = 16000, chunk
                         
                         elif data.get("type") == "status":
                             status = data.get("status", "")
-                            # Проверяем наличие final_transcription в сообщении session_closed
-                            if status == "session_closed":
+                            # Проверяем наличие final_transcription в сообщении session_closed или inactivity_timeout
+                            if status in ("session_closed", "inactivity_timeout"):
                                 final_text = data.get("final_transcription", "") or data.get("transcription", "")
                                 if final_text:
                                     final_transcription = final_text
                                     logger.info(f"\nФинальная транскрипция: {final_text}")
+                                if status == "inactivity_timeout":
+                                    logger.info("Сессия закрыта по таймауту неактивности")
+                                stop_recording = True
+                                break
                         
                         elif data.get("type") == "error":
                             logger.error(f"Ошибка: {data.get('error')}")
                 except ConnectionClosed:
-                    logger.info("\nСоединение закрыто")
+                    logger.info("\nСоединение закрыто сервером")
+                    stop_recording = True
             
             receive_task = asyncio.create_task(receive_transcriptions())
             
             try:
-                while True:
+                while not stop_recording:
                     audio_data = stream.read(chunk_size_samples, exception_on_overflow=False)
                     audio_array = np.frombuffer(audio_data, dtype=np.float32)
                     
-                    await websocket.send(audio_array.tobytes())
+                    try:
+                        await websocket.send(audio_array.tobytes())
+                    except ConnectionClosed:
+                        logger.info("\nСоединение закрыто")
+                        break
                     await asyncio.sleep(0.01)
             
             except KeyboardInterrupt:
                 logger.info("\nОстановка записи...")
-                await websocket.send(json.dumps({"action": "end_session"}))
-                await asyncio.sleep(1)
+                try:
+                    await websocket.send(json.dumps({"action": "end_session"}))
+                    await asyncio.sleep(1)
+                except ConnectionClosed:
+                    pass
+            
+            # Ждём завершения receive_task
+            if not receive_task.done():
                 receive_task.cancel()
+                try:
+                    await receive_task
+                except asyncio.CancelledError:
+                    pass
         
         stream.stop_stream()
         
@@ -402,6 +430,7 @@ def main():
     parser.add_argument("--sample-rate", type=int, default=16000, help="Частота дискретизации для микрофона")
     parser.add_argument("--output", help="Путь к файлу для сохранения результатов (по умолчанию: автоматически)")
     parser.add_argument("--debug", action="store_true", help="Включить детальное логирование для отладки")
+    parser.add_argument("--realtime", action="store_true", help="Имитировать микрофон (отправка чанков в реальном времени)")
     
     args = parser.parse_args()
     
@@ -424,7 +453,7 @@ def main():
             logger.error(f"Файл не найден: {args.audio}")
             sys.exit(1)
         
-        asyncio.run(transcribe_audio_file(args.server, args.audio, args.chunk_size, args.output))
+        asyncio.run(transcribe_audio_file(args.server, args.audio, args.chunk_size, args.output, args.realtime))
     
     elif args.microphone:
         asyncio.run(transcribe_microphone(args.server, args.sample_rate, args.chunk_size, args.output))

@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
-  streaming-asr-server:
+  asr-server:
     build:
-      context: .
+      context: ./server
       dockerfile: Dockerfile
-    container_name: streaming-asr-server
+    container_name: asr-server
     
     shm_size: 64g
     ulimits:
@@ -27,13 +25,68 @@ services:
       - CUDA_VISIBLE_DEVICES=0
     
     volumes:
-      - /home/vlad/train_nemo/stt_en_fastconformer_hybrid_large_streaming_multi/stt_en_fastconformer_hybrid_large_streaming_multi.nemo:/app/model.nemo:ro
+      # Укажите путь к вашей модели здесь:
+      - /home/vlad/nemo/kazakh_russian_clean_1024_new_wer_17.nemo:/app/model.nemo:ro
       - ~/.cache:/root/.cache
     
-    ports:
-      - "6009:6009"
+    network_mode: host
     
-    command: python server.py --model /app/model.nemo --port 6009 --host 0.0.0.0 --device 0
+    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device 0
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    restart: unless-stopped
 
+  # CPU-версия сервера (без GPU)
+  asr-server-cpu:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: asr-server-cpu
+    
+    shm_size: 8g
+    
+    environment:
+      - PYTHONPATH=/app
+    
+    volumes:
+      - /home/vlad/nemo/kazakh_russian_clean_1024_new_wer_17.nemo:/app/model.nemo:ro
+      - ~/.cache:/root/.cache
+    
+    network_mode: host
+    
+    # --device -1 для CPU, --max-sessions 10, --inactivity-timeout 20
+    command: python server.py --model /app/model.nemo --port 8765 --host 0.0.0.0 --device -1 --max-sessions 10 --inactivity-timeout 20
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    
+    profiles:
+      - cpu
 
-
+  asr-client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: asr-client
+    
+    volumes:
+      - ./client/audio:/app/audio:ro
+    
+    network_mode: host
+    
+    # По умолчанию не запускается автоматически
+    profiles:
+      - client
+    
+    # Пример команды:
+    # docker compose --profile client run --rm asr-client --server ws://localhost:8765/ws/transcribe --audio /app/audio/test.wav

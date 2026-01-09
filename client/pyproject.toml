@@ -1,0 +1,23 @@
+[project]
+name = "streaming-asr-client"
+version = "1.0.0"
+description = "Client for Streaming ASR Server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=12.0",
+    "numpy>=1.24.0",
+    "soundfile>=0.12.0",
+]
+
+[project.optional-dependencies]
+microphone = [
+    "pyaudio>=0.2.14",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+

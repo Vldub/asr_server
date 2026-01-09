@@ -42,43 +42,37 @@ curl http://localhost:8765/health
 
 #### Транскрипция аудио файла
 
-Поместите аудио файл в директорию `client/audio/` или укажите полный путь:
+Поместите аудио файл в директорию `client/audio/`:
 
 ```bash
-# Если файл в client/audio/
-docker compose run --rm asr-client \
+# Файл должен быть в client/audio/
+docker compose --profile client run --rm asr-client \
   --server ws://asr-server:8765/ws/transcribe \
   --audio /app/audio/your_audio.wav
-
-# Или с полным путем (если файл вне контейнера)
-docker compose run --rm asr-client \
-  --server ws://asr-server:8765/ws/transcribe \
-  --audio /home/vlad/path/to/audio.wav
 ```
 
 #### Транскрипция с микрофона
 
 ```bash
-docker compose run --rm -it asr-client \
+# Примечание: для работы микрофона в Docker требуется дополнительная настройка
+# Рекомендуется использовать локальный клиент для микрофона
+docker compose --profile client run --rm -it asr-client \
   --server ws://asr-server:8765/ws/transcribe \
   --microphone
 ```
 
-### Вариант B: Локально (без Docker)
+### Вариант B: Локально с uv
 
 ```bash
 cd client
 
-# Установка зависимостей
-pip install -r requirements.txt
-
-# Транскрипция файла
-python client.py \
+# Транскрипция файла (uv автоматически установит зависимости)
+uv run client.py \
   --server ws://localhost:8765/ws/transcribe \
   --audio /path/to/audio.wav
 
 # Или транскрипция с микрофона
-python client.py \
+uv run --extra microphone client.py \
   --server ws://localhost:8765/ws/transcribe \
   --microphone
 ```

@@ -10,11 +10,11 @@
 │   ├── server.py       # WebSocket сервер на FastAPI
 │   ├── asr_engine.py   # ASR движок для обработки аудио
 │   ├── Dockerfile      # Docker образ для сервера
-│   └── requirements.txt
+│   └── pyproject.toml  # Зависимости (uv)
 ├── client/              # Клиентская часть
 │   ├── client.py       # Клиент для подключения к серверу
 │   ├── Dockerfile      # Docker образ для клиента
-│   ├── requirements.txt
+│   ├── pyproject.toml  # Зависимости (uv)
 │   └── audio/          # Директория для аудио файлов
 ├── docker-compose.yml   # Общий docker-compose для сервера и клиента
 ├── README.md
@@ -33,10 +33,10 @@
 
 ## Требования
 
-- Docker и Docker Compose (версия 3.8+)
+- Docker и Docker Compose
 - NVIDIA GPU с CUDA (рекомендуется для сервера)
 - NeMo модель (.nemo файл)
-- Для клиента: Python 3.11+ (при локальном использовании)
+- Для локального использования: Python 3.10+, [uv](https://docs.astral.sh/uv/)
 
 ## Быстрый старт
 
@@ -62,15 +62,14 @@
 
 4. **Используйте клиент**:
    ```bash
-   # Через Docker
-   docker compose run --rm asr-client \
-     --server ws://asr-server:8765/ws/transcribe \
+   # Через Docker (поместите файл в client/audio/)
+   docker compose --profile client run --rm asr-client \
+     --server ws://localhost:8765/ws/transcribe \
      --audio /app/audio/your_audio.wav
    
-   # Или локально
+   # Или локально с uv
    cd client
-   pip install -r requirements.txt
-   python client.py --server ws://localhost:8765/ws/transcribe --audio /path/to/audio.wav
+   uv run client.py --server ws://localhost:8765/ws/transcribe --audio /path/to/audio.wav
    ```
 
 ## Использование
@@ -87,8 +86,8 @@ docker compose up -d asr-server
 
 ```bash
 cd server
-pip install -r requirements.txt
-python server.py --model /path/to/model.nemo --port 8765 --host 0.0.0.0
+uv sync --extra nemo
+uv run server.py --model /path/to/model.nemo --port 8765 --host 0.0.0.0
 ```
 
 ### Использование клиента
@@ -96,13 +95,13 @@ python server.py --model /path/to/model.nemo --port 8765 --host 0.0.0.0
 #### Через Docker
 
 ```bash
-# Транскрипция аудио файла
-docker compose run --rm asr-client \
+# Транскрипция аудио файла (поместите файл в client/audio/)
+docker compose --profile client run --rm asr-client \
   --server ws://asr-server:8765/ws/transcribe \
   --audio /app/audio/your_audio.wav
 
-# Транскрипция с микрофона
-docker compose run --rm -it asr-client \
+# Транскрипция с микрофона (требует дополнительной настройки Docker)
+docker compose --profile client run --rm -it asr-client \
   --server ws://asr-server:8765/ws/transcribe \
   --microphone
 ```
@@ -111,19 +110,18 @@ docker compose run --rm -it asr-client \
 - Поместите файлы в `client/audio/` для доступа через `/app/audio/`
 - Или используйте полный путь, если файл смонтирован через volumes в `docker-compose.yml`
 
-#### Локально (без Docker)
+#### Локально с uv
 
 ```bash
 cd client
-pip install -r requirements.txt
 
 # Транскрипция файла
-python client.py \
+uv run client.py \
   --server ws://localhost:8765/ws/transcribe \
   --audio /path/to/audio.wav
 
-# Транскрипция с микрофона
-python client.py \
+# Транскрипция с микрофона (требует pyaudio)
+uv run --extra microphone client.py \
   --server ws://localhost:8765/ws/transcribe \
   --microphone
 ```
