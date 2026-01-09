@@ -1,0 +1,78 @@
+name: "streaming_asr"
+backend: "python"
+max_batch_size: 0  # Для sequence batching используем 0
+
+input [
+  {
+    name: "audio_signal"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Variable length audio chunk
+  }
+]
+
+output [
+  {
+    name: "transcription"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+# Sequence batching для streaming с сохранением состояния
+sequence_batching {
+  max_sequence_idle_microseconds: 30000000  # 30 секунд таймаут неактивности
+  
+  # Direct: каждый запрос обрабатывается немедленно (для low latency)
+  direct { }
+  
+  control_input [
+    {
+      name: "START"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_START
+          fp32_false_true: [ 0, 1 ]
+        }
+      ]
+    },
+    {
+      name: "END"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_END
+          fp32_false_true: [ 0, 1 ]
+        }
+      ]
+    },
+    {
+      name: "CORRID"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_CORRID
+          data_type: TYPE_UINT64
+        }
+      ]
+    }
+  ]
+}
+
+# Количество инстансов модели
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Параметры модели
+parameters {
+  key: "model_path"
+  value: {
+    string_value: "/models/model.nemo"
+  }
+}
+
+# Версионирование
+version_policy: { latest { num_versions: 1 } }
+

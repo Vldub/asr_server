@@ -1,0 +1,31 @@
+[project]
+name = "triton-streaming-asr"
+version = "1.0.0"
+description = "Triton Inference Server integration for Streaming ASR"
+requires-python = ">=3.10"
+dependencies = [
+    "tritonclient[grpc]>=2.40.0",
+    "numpy>=1.24.0",
+    "soundfile>=0.12.0",
+]
+
+[project.optional-dependencies]
+export = [
+    "torch>=2.0.0",
+    "nemo-toolkit[asr]>=2.5.0",
+    "onnx>=1.14.0",
+    "onnxruntime>=1.16.0",
+]
+microphone = [
+    "pyaudio>=0.2.14",
+]
+
+[project.scripts]
+triton-asr-client = "client:main"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
