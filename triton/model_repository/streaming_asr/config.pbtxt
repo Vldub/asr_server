@@ -1,6 +1,6 @@
 name: "streaming_asr"
 backend: "python"
-max_batch_size: 0  # Для sequence batching используем 0
+max_batch_size: 0  # Для sequence batching с direct стратегией
 
 input [
   {
@@ -18,11 +18,11 @@ output [
   }
 ]
 
-# Sequence batching для streaming с сохранением состояния
+# Sequence batching для streaming
 sequence_batching {
   max_sequence_idle_microseconds: 30000000  # 30 секунд таймаут неактивности
   
-  # Direct: каждый запрос обрабатывается немедленно (для low latency)
+  # Direct стратегия: каждый запрос обрабатывается немедленно (low latency)
   direct { }
   
   control_input [
@@ -56,13 +56,24 @@ sequence_batching {
   ]
 }
 
-# Количество инстансов модели
+# Количество инстансов модели на GPU
 instance_group [
   {
-    count: 1
-    kind: KIND_CPU
+    count: 16
+    kind: KIND_GPU
   }
 ]
+
+# Оптимизация памяти: Pinned Memory для быстрого CPU↔GPU transfer
+optimization {
+  input_pinned_memory { enable: true }
+  output_pinned_memory { enable: true }
+}
+
+# Decoupled Mode отключён - требует специальный клиент
+# model_transaction_policy {
+#   decoupled: true
+# }
 
 # Параметры модели
 parameters {
@@ -74,4 +85,3 @@ parameters {
 
 # Версионирование
 version_policy: { latest { num_versions: 1 } }
-

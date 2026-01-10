@@ -1,13 +1,14 @@
 # Кастомный Triton образ с NeMo для Python Backend
 FROM nvcr.io/nvidia/tritonserver:24.07-py3
 
-# Устанавливаем PyTorch и NeMo
+# Устанавливаем PyTorch, NeMo и CUDA Python
 RUN pip install --no-cache-dir \
     torch>=2.3.0 \
     nemo-toolkit[asr]==2.5.3 \
     omegaconf>=2.3.0 \
     hydra-core>=1.3.0 \
-    scipy>=1.10.0
+    scipy>=1.10.0 \
+    cuda-python>=12.3
 
 # Копируем model repository
 COPY model_repository /models

@@ -1,5 +1,6 @@
 """
 Triton Python Backend для Streaming ASR с NeMo.
+Поддержка Decoupled Mode для отправки промежуточных результатов.
 """
 
 import json
@@ -25,20 +26,24 @@ def lazy_import():
 
 
 class TritonPythonModel:
-    """Triton Python Backend для Streaming ASR."""
+    """Triton Python Backend для Streaming ASR с Decoupled Mode."""
     
     def initialize(self, args):
         """Инициализация модели при загрузке."""
         lazy_import()
         
-        self.model_config = json.loads(args['model_config'])
+        self.model_config = json.loads(args["model_config"])
+        
+        # Проверяем decoupled mode
+        self.decoupled = self.model_config.get("model_transaction_policy", {}).get("decoupled", False)
+        logger.info(f"Decoupled mode: {self.decoupled}")
         
         # Определяем устройство
-        device_id = args.get('model_instance_device_id', '0')
+        device_id = args.get("model_instance_device_id", "0")
         if torch.cuda.is_available() and int(device_id) >= 0:
-            self.device = torch.device(f'cuda:{device_id}')
+            self.device = torch.device(f"cuda:{device_id}")
         else:
-            self.device = torch.device('cpu')
+            self.device = torch.device("cpu")
         
         logger.info(f"Инициализация Streaming ASR на устройстве: {self.device}")
         
@@ -47,9 +52,16 @@ class TritonPythonModel:
         
         # Кэш состояний для активных последовательностей
         self.sequence_states = {}
-        self.min_chunk_samples = 8000  # 0.5 сек
+        self.min_chunk_samples = 8000  # 0.5 сек минимальный чанк
         
-        logger.info("Streaming ASR инициализирован")
+        # Статистика для мониторинга
+        self.batch_stats = {
+            "total_batches": 0,
+            "total_requests": 0,
+            "max_batch_size": 0,
+        }
+        
+        logger.info("Streaming ASR с Decoupled Mode инициализирован")
     
     def _load_model(self):
         """Загружает NeMo модель."""
@@ -69,7 +81,7 @@ class TritonPythonModel:
         logger.info("Модель NeMo загружена")
     
     def _get_initial_cache_state(self):
-        """Создаёт начальное состояние кэша."""
+        """Создаёт начальное состояние кэша для новой sequence."""
         batch_size = 1
         cache_last_channel, cache_last_time, cache_last_channel_len = \
             self.asr_model.encoder.get_initial_cache_state(batch_size=batch_size)
@@ -85,7 +97,7 @@ class TritonPythonModel:
         }
     
     def _transcribe_chunk(self, audio, state):
-        """Транскрибирует аудио чанк."""
+        """Транскрибирует аудио чанк для одной sequence."""
         from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
         
         audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(
@@ -135,63 +147,120 @@ class TritonPythonModel:
         state["full_transcription"] = text
         return text, state
     
+    def _process_single_request(self, request):
+        """Обрабатывает один запрос."""
+        # Получаем аудио
+        audio_tensor = pb_utils.get_input_tensor_by_name(request, "audio_signal")
+        audio_data = audio_tensor.as_numpy().flatten().astype(np.float32)
+        
+        # Sequence ID и флаги
+        sequence_id = request.correlation_id()
+        flags = request.flags()
+        sequence_start = bool(flags & 1)  # SEQUENCE_START
+        sequence_end = bool(flags & 2)    # SEQUENCE_END
+        
+        # Управление состоянием
+        if sequence_start or sequence_id not in self.sequence_states:
+            self.sequence_states[sequence_id] = self._get_initial_cache_state()
+            logger.info(f"Новая сессия: {sequence_id}")
+        
+        state = self.sequence_states[sequence_id]
+        state["audio_buffer"] = np.concatenate([state["audio_buffer"], audio_data])
+        
+        transcription = ""
+        
+        # Транскрибируем если накопился достаточный буфер или это конец
+        if len(state["audio_buffer"]) >= self.min_chunk_samples or sequence_end:
+            if len(state["audio_buffer"]) > 0:
+                transcription, state = self._transcribe_chunk(state["audio_buffer"], state)
+                state["audio_buffer"] = np.array([], dtype=np.float32)
+        
+        # Завершение sequence
+        is_final = False
+        if sequence_end:
+            transcription = state["full_transcription"]
+            del self.sequence_states[sequence_id]
+            logger.info(f"Сессия завершена: {sequence_id}")
+            is_final = True
+        
+        return transcription, is_final
+    
     def execute(self, requests):
-        """Обрабатывает batch запросов."""
+        """
+        Обрабатывает батч запросов в Decoupled Mode.
+        
+        В Decoupled Mode ответы отправляются через response_sender,
+        что позволяет отправлять промежуточные результаты по мере готовности.
+        """
         lazy_import()
+        
+        batch_size = len(requests)
+        self.batch_stats["total_batches"] += 1
+        self.batch_stats["total_requests"] += batch_size
+        self.batch_stats["max_batch_size"] = max(
+            self.batch_stats["max_batch_size"], batch_size
+        )
+        
+        if batch_size > 1:
+            logger.debug(f"Обработка батча: {batch_size} запросов")
+        
         responses = []
         
         for request in requests:
             try:
-                # Получаем аудио
-                audio_tensor = pb_utils.get_input_tensor_by_name(request, "audio_signal")
-                audio_data = audio_tensor.as_numpy().flatten().astype(np.float32)
+                # В Decoupled mode используем response_sender
+                if self.decoupled:
+                    response_sender = request.get_response_sender()
                 
-                # Sequence ID
-                sequence_id = request.correlation_id()
-                flags = request.flags()
-                sequence_start = bool(flags & 1)  # SEQUENCE_START
-                sequence_end = bool(flags & 2)    # SEQUENCE_END
+                transcription, is_final = self._process_single_request(request)
                 
-                # Управление состоянием
-                if sequence_start or sequence_id not in self.sequence_states:
-                    self.sequence_states[sequence_id] = self._get_initial_cache_state()
-                    logger.info(f"Новая сессия: {sequence_id}")
-                
-                state = self.sequence_states[sequence_id]
-                state["audio_buffer"] = np.concatenate([state["audio_buffer"], audio_data])
-                
-                transcription = ""
-                
-                # Транскрибируем
-                if len(state["audio_buffer"]) >= self.min_chunk_samples or sequence_end:
-                    if len(state["audio_buffer"]) > 0:
-                        transcription, state = self._transcribe_chunk(state["audio_buffer"], state)
-                        state["audio_buffer"] = np.array([], dtype=np.float32)
-                
-                if sequence_end:
-                    transcription = state["full_transcription"]
-                    del self.sequence_states[sequence_id]
-                    logger.info(f"Сессия завершена: {sequence_id}")
-                
-                # Ответ
+                # Создаём ответ
                 out_tensor = pb_utils.Tensor(
                     "transcription",
                     np.array([transcription], dtype=object)
                 )
                 response = pb_utils.InferenceResponse(output_tensors=[out_tensor])
-                responses.append(response)
+                
+                if self.decoupled:
+                    # В Decoupled mode отправляем через response_sender
+                    # flags указывает является ли это финальным ответом
+                    flags = pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL if is_final else 0
+                    response_sender.send(response, flags=flags)
+                    
+                    # Если не финальный - закрываем sender после отправки
+                    if is_final:
+                        responses.append(None)  # Placeholder
+                    else:
+                        responses.append(None)
+                else:
+                    responses.append(response)
                 
             except Exception as e:
-                logger.error(f"Ошибка: {e}")
+                logger.error(f"Ошибка обработки запроса: {e}")
                 import traceback
                 traceback.print_exc()
-                error = pb_utils.TritonError(str(e))
-                response = pb_utils.InferenceResponse(error=error)
-                responses.append(response)
+                
+                if self.decoupled:
+                    response_sender = request.get_response_sender()
+                    error = pb_utils.TritonError(str(e))
+                    error_response = pb_utils.InferenceResponse(error=error)
+                    response_sender.send(
+                        error_response, 
+                        flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL
+                    )
+                    responses.append(None)
+                else:
+                    error = pb_utils.TritonError(str(e))
+                    response = pb_utils.InferenceResponse(error=error)
+                    responses.append(response)
         
+        # В Decoupled mode возвращаем None (ответы уже отправлены)
+        if self.decoupled:
+            return None
         return responses
     
     def finalize(self):
-        """Очистка."""
+        """Очистка при выгрузке модели."""
         logger.info("Выгрузка Streaming ASR")
+        logger.info(f"Статистика батчинга: {self.batch_stats}")
         self.sequence_states.clear()
