@@ -29,7 +29,7 @@ services:
       # Model repository (для обновления config.pbtxt без пересборки)
       - ./model_repository/streaming_asr:/models/streaming_asr:ro
       # NeMo модель (путь к модели в проекте)
-      - /home/vlad/streaming_asr_server/kazakh_russian_clean_1024_new_wer_17.nemo:/models/model.nemo:ro
+      - /home/vlad/Загрузки/Speech_To_Text_Finetuning.nemo:/models/model.nemo:ro
       # Кэш для ускорения загрузки
       - ~/.cache:/root/.cache
     
@@ -42,7 +42,8 @@ services:
       tritonserver 
       --model-repository=/models
       --strict-model-config=false
-      --log-verbose=1
+      --log-verbose=0
+      --log-info=false
       --backend-config=python,shm-default-byte-size=134217728
       --rate-limit=execution_count
       --rate-limit-resource=gpu:0:4
@@ -63,16 +64,37 @@ services:
       dockerfile: Dockerfile.server
     container_name: triton-asr-server-cpu
     
-    shm_size: 8g
+    # Shared memory для IPC между процессами
+    shm_size: 64g
+    
+    # Лимиты ресурсов для стабильности
+    ulimits:
+      memlock: -1          # Без лимита на locked memory
+      stack: 67108864      # 64MB stack
+      nofile:
+        soft: 65536
+        hard: 65536
     
     network_mode: host
     
     environment:
-      - OMP_NUM_THREADS=4
+      - OMP_NUM_THREADS=12
     
     volumes:
-      - /home/vlad/streaming_asr_server/kazakh_russian_clean_1024_new_wer_17.nemo:/models/model.nemo:ro
+      # Model repository для обновления config без пересборки
+      - ./model_repository/streaming_asr:/models/streaming_asr:ro
+      # NeMo модель
+      - /home/vlad/Загрузки/Speech_To_Text_Finetuning.nemo:/models/model.nemo:ro
+      # Кэш для ускорения загрузки
       - ~/.cache:/root/.cache
+    
+    command: >
+      tritonserver 
+      --model-repository=/models
+      --strict-model-config=false
+      --log-verbose=0
+      --log-info=false
+      --backend-config=python,shm-default-byte-size=268435456
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
@@ -80,6 +102,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 300s
+    
+    restart: unless-stopped
     
     profiles:
       - cpu

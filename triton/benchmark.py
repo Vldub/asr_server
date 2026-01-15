@@ -274,7 +274,7 @@ async def run_benchmark(
     model_name: str,
     use_stream: bool = False
 ) -> BenchmarkResults:
-    """Запускает нагрузочное тестирование."""
+    """Запускает нагрузочное тестирование (batch режим)."""
     
     logger.info(f"Загрузка аудио: {audio_file}")
     audio_data, sample_rate = sf.read(audio_file)
@@ -345,6 +345,122 @@ async def run_benchmark(
     return results
 
 
+async def run_sustained_benchmark(
+    server_url: str,
+    audio_file: str,
+    concurrent: int,
+    total_requests: int,
+    chunk_size_ms: int,
+    model_name: str,
+    use_stream: bool = False
+) -> BenchmarkResults:
+    """
+    Непрерывная нагрузка: постоянно держит N параллельных запросов.
+    Новые запросы запускаются по мере завершения старых.
+    """
+    
+    logger.info(f"Загрузка аудио: {audio_file}")
+    audio_data, sample_rate = sf.read(audio_file)
+    
+    if len(audio_data.shape) > 1:
+        audio_data = np.mean(audio_data, axis=1)
+    
+    if audio_data.dtype != np.float32:
+        if audio_data.dtype == np.int16:
+            audio_data = audio_data.astype(np.float32) / 32768.0
+        else:
+            audio_data = audio_data.astype(np.float32)
+    
+    audio_duration = len(audio_data) / sample_rate
+    logger.info(f"Аудио: {audio_duration:.2f}s, sample_rate={sample_rate}")
+    
+    results = BenchmarkResults()
+    results.total_requests = total_requests
+    
+    request_func = run_single_request_stream if use_stream else run_single_request_simple
+    mode = "StreamInfer (Decoupled)" if use_stream else "Infer (Standard)"
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"🚀 НЕПРЕРЫВНОЕ НАГРУЗОЧНОЕ ТЕСТИРОВАНИЕ TRITON")
+    logger.info(f"{'='*60}")
+    logger.info(f"Сервер: {server_url}")
+    logger.info(f"Модель: {model_name}")
+    logger.info(f"Режим: {mode}")
+    logger.info(f"Параллельных запросов (постоянно): {concurrent}")
+    logger.info(f"Всего запросов: {total_requests}")
+    logger.info(f"{'='*60}\n")
+    
+    results.start_time = time.perf_counter()
+    
+    # Счётчики
+    request_id = 0
+    completed = 0
+    active_tasks = set()
+    
+    # Создаём начальные задачи
+    for _ in range(min(concurrent, total_requests)):
+        request_id += 1
+        task = asyncio.create_task(
+            request_func(
+                server_url=server_url,
+                audio_data=audio_data,
+                sample_rate=sample_rate,
+                chunk_size_ms=chunk_size_ms,
+                request_id=request_id,
+                model_name=model_name
+            )
+        )
+        active_tasks.add(task)
+    
+    last_log = 0
+    
+    while active_tasks:
+        # Ждём завершения любой задачи
+        done, active_tasks = await asyncio.wait(
+            active_tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        for task in done:
+            metrics = task.result()
+            results.metrics.append(metrics)
+            completed += 1
+            
+            if metrics.success:
+                results.successful_requests += 1
+            else:
+                results.failed_requests += 1
+                logger.warning(f"  Запрос #{metrics.request_id} FAILED: {metrics.error}")
+            
+            # Логируем прогресс каждые 10 запросов
+            if completed - last_log >= 10 or completed == total_requests:
+                elapsed = time.perf_counter() - results.start_time
+                rps = completed / elapsed if elapsed > 0 else 0
+                # Показываем количество активных задач
+                active_count = len(active_tasks) + (1 if request_id < total_requests else 0)
+                logger.info(f"  Завершено: {completed}/{total_requests} | "
+                           f"Активных: {active_count} | "
+                           f"RPS: {rps:.2f}")
+                last_log = completed
+            
+            # Запускаем новую задачу если ещё есть запросы
+            if request_id < total_requests:
+                request_id += 1
+                new_task = asyncio.create_task(
+                    request_func(
+                        server_url=server_url,
+                        audio_data=audio_data,
+                        sample_rate=sample_rate,
+                        chunk_size_ms=chunk_size_ms,
+                        request_id=request_id,
+                        model_name=model_name
+                    )
+                )
+                active_tasks.add(new_task)
+    
+    results.end_time = time.perf_counter()
+    return results
+
+
 def print_results(results: BenchmarkResults):
     """Выводит результаты."""
     successful = results.get_successful_metrics()
@@ -402,9 +518,11 @@ def main():
     parser.add_argument("--model", default="streaming_asr", help="Имя модели")
     parser.add_argument("--audio", required=True, help="Путь к аудио файлу")
     parser.add_argument("--concurrent", type=int, default=5, help="Параллельных запросов")
-    parser.add_argument("--iterations", type=int, default=3, help="Итераций")
-    parser.add_argument("--chunk-size", type=int, default=100, help="Размер чанка в мс")
+    parser.add_argument("--iterations", type=int, default=3, help="Итераций (для batch режима)")
+    parser.add_argument("--total", type=int, default=0, help="Всего запросов (для sustained режима)")
+    parser.add_argument("--chunk-size", type=int, default=1000, help="Размер чанка в мс")
     parser.add_argument("--stream", action="store_true", help="Использовать StreamInfer (для Decoupled Mode)")
+    parser.add_argument("--sustained", action="store_true", help="Непрерывная нагрузка (постоянно N параллельных)")
     
     args = parser.parse_args()
     
@@ -412,15 +530,29 @@ def main():
         logger.error(f"Файл не найден: {args.audio}")
         return
     
-    results = asyncio.run(run_benchmark(
-        server_url=args.server,
-        audio_file=args.audio,
-        concurrent=args.concurrent,
-        iterations=args.iterations,
-        chunk_size_ms=args.chunk_size,
-        model_name=args.model,
-        use_stream=args.stream
-    ))
+    if args.sustained:
+        # Sustained режим: постоянно держим N параллельных запросов
+        total = args.total if args.total > 0 else args.concurrent * args.iterations
+        results = asyncio.run(run_sustained_benchmark(
+            server_url=args.server,
+            audio_file=args.audio,
+            concurrent=args.concurrent,
+            total_requests=total,
+            chunk_size_ms=args.chunk_size,
+            model_name=args.model,
+            use_stream=args.stream
+        ))
+    else:
+        # Batch режим: N параллельных * M итераций
+        results = asyncio.run(run_benchmark(
+            server_url=args.server,
+            audio_file=args.audio,
+            concurrent=args.concurrent,
+            iterations=args.iterations,
+            chunk_size_ms=args.chunk_size,
+            model_name=args.model,
+            use_stream=args.stream
+        ))
     
     print_results(results)
 

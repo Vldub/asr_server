@@ -1,0 +1,87 @@
+name: "streaming_asr"
+backend: "python"
+max_batch_size: 0  # Для sequence batching с direct стратегией
+
+input [
+  {
+    name: "audio_signal"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Variable length audio chunk
+  }
+]
+
+output [
+  {
+    name: "transcription"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+# Sequence batching для streaming
+sequence_batching {
+  max_sequence_idle_microseconds: 30000000  # 30 секунд таймаут неактивности
+  
+  # Direct стратегия: каждый запрос обрабатывается немедленно (low latency)
+  direct { }
+  
+  control_input [
+    {
+      name: "START"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_START
+          fp32_false_true: [ 0, 1 ]
+        }
+      ]
+    },
+    {
+      name: "END"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_END
+          fp32_false_true: [ 0, 1 ]
+        }
+      ]
+    },
+    {
+      name: "CORRID"
+      control [
+        {
+          kind: CONTROL_SEQUENCE_CORRID
+          data_type: TYPE_UINT64
+        }
+      ]
+    }
+  ]
+}
+
+# Количество инстансов модели на GPU
+instance_group [
+  {
+    count: 16
+    kind: KIND_GPU
+  }
+]
+
+# Оптимизация памяти: Pinned Memory для быстрого CPU↔GPU transfer
+optimization {
+  input_pinned_memory { enable: true }
+  output_pinned_memory { enable: true }
+}
+
+# Decoupled Mode отключён - требует специальный клиент
+# model_transaction_policy {
+#   decoupled: true
+# }
+
+# Параметры модели
+parameters {
+  key: "model_path"
+  value: {
+    string_value: "/models/model.nemo"
+  }
+}
+
+# Версионирование
+version_policy: { latest { num_versions: 1 } }

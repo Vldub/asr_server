@@ -61,7 +61,7 @@ sequence_batching {
 # CPU: один инстанс модели (избегаем конкуренции за ресурсы)
 instance_group [
   {
-    count: 1
+    count: 3
     kind: KIND_CPU
   }
 ]
@@ -85,11 +85,11 @@ parameters {
 }
 
 # Оптимальный размер чанка для транскрипции (мс)
-# Больший буфер = стабильнее транскрипция, но больше задержка
+# Модель работает лучше с чанками ~1040ms
 parameters {
   key: "optimal_chunk_ms"
   value: {
-    string_value: "2000"
+    string_value: "1040"
   }
 }
 

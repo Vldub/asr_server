@@ -264,7 +264,7 @@ def main():
     parser.add_argument("--model", default="streaming_asr", help="Имя модели")
     parser.add_argument("--audio", help="Путь к аудио файлу")
     parser.add_argument("--microphone", action="store_true", help="Использовать микрофон")
-    parser.add_argument("--chunk-size", type=int, default=100, help="Размер чанка в мс")
+    parser.add_argument("--chunk-size", type=int, default=80, help="Размер чанка в мс")
     parser.add_argument("--sample-rate", type=int, default=16000, help="Sample rate для микрофона")
     
     args = parser.parse_args()

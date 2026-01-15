@@ -52,7 +52,21 @@ class TritonPythonModel:
         
         # Кэш состояний для активных последовательностей
         self.sequence_states = {}
-        self.min_chunk_samples = 8000  # 0.5 сек минимальный чанк
+        
+        # Оптимальный размер чанка для модели
+        # 1040ms при 16kHz = 16640 samples
+        # Можно переопределить через параметры модели
+        self.sample_rate = int(self.model_config.get("parameters", {}).get(
+            "sample_rate", {"string_value": "16000"}
+        ).get("string_value", "16000"))
+        
+        optimal_chunk_ms = int(self.model_config.get("parameters", {}).get(
+            "optimal_chunk_ms", {"string_value": "1040"}
+        ).get("string_value", "1040"))
+        
+        self.min_chunk_samples = int(optimal_chunk_ms * self.sample_rate / 1000)
+        
+        logger.info(f"Оптимальный размер чанка: {optimal_chunk_ms}ms = {self.min_chunk_samples} samples")
         
         # Статистика для мониторинга
         self.batch_stats = {
@@ -167,13 +181,19 @@ class TritonPythonModel:
         state = self.sequence_states[sequence_id]
         state["audio_buffer"] = np.concatenate([state["audio_buffer"], audio_data])
         
-        transcription = ""
+        buffer_samples = len(state["audio_buffer"])
+        buffer_ms = buffer_samples * 1000 / self.sample_rate
         
         # Транскрибируем если накопился достаточный буфер или это конец
-        if len(state["audio_buffer"]) >= self.min_chunk_samples or sequence_end:
-            if len(state["audio_buffer"]) > 0:
+        if buffer_samples >= self.min_chunk_samples or sequence_end:
+            if buffer_samples > 0:
+                logger.debug(f"Транскрибирую буфер {buffer_ms:.0f}ms ({buffer_samples} samples)")
                 transcription, state = self._transcribe_chunk(state["audio_buffer"], state)
                 state["audio_buffer"] = np.array([], dtype=np.float32)
+        else:
+            # Буфер ещё накапливается - возвращаем последнюю транскрипцию
+            transcription = state["full_transcription"]
+            logger.debug(f"Накопление буфера: {buffer_ms:.0f}ms / {self.min_chunk_samples * 1000 / self.sample_rate:.0f}ms")
         
         # Завершение sequence
         is_final = False
