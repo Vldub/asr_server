@@ -126,6 +126,8 @@ class TritonPythonModel:
                 length=audio_lengths
             )
             
+            # Используем оптимальные параметры из streaming_cfg модели
+            # drop_extra_pre_encoded=2 рекомендуется для этой архитектуры
             (
                 pred_out_stream,
                 transcribed_texts,
@@ -142,7 +144,7 @@ class TritonPythonModel:
                 keep_all_outputs=True,
                 previous_hypotheses=state["previous_hypotheses"],
                 previous_pred_out=state["pred_out_stream"],
-                drop_extra_pre_encoded=0,
+                drop_extra_pre_encoded=None,  # Использовать значение из streaming_cfg модели
                 return_transcription=True,
             )
         
