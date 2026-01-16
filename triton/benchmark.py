@@ -22,6 +22,28 @@ from queue import Queue
 import numpy as np
 import soundfile as sf
 
+# Целевой sample rate для модели ASR
+TARGET_SAMPLE_RATE = 16000
+
+def resample_audio(audio_data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Ресемплинг аудио с помощью scipy (качественный) или интерполяции (fallback)."""
+    if orig_sr == target_sr:
+        return audio_data
+    
+    try:
+        from scipy import signal
+        # Качественный ресемплинг через scipy
+        new_length = int(len(audio_data) * target_sr / orig_sr)
+        new_audio = signal.resample(audio_data, new_length)
+        return new_audio.astype(np.float32)
+    except ImportError:
+        # Fallback на линейную интерполяцию
+        duration = len(audio_data) / orig_sr
+        new_length = int(duration * target_sr)
+        old_indices = np.linspace(0, len(audio_data) - 1, new_length)
+        new_audio = np.interp(old_indices, np.arange(len(audio_data)), audio_data)
+        return new_audio.astype(np.float32)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -288,6 +310,12 @@ async def run_benchmark(
         else:
             audio_data = audio_data.astype(np.float32)
     
+    # Ресемплинг до целевого sample rate
+    if sample_rate != TARGET_SAMPLE_RATE:
+        logger.info(f"Ресемплинг: {sample_rate}Hz -> {TARGET_SAMPLE_RATE}Hz")
+        audio_data = resample_audio(audio_data, sample_rate, TARGET_SAMPLE_RATE)
+        sample_rate = TARGET_SAMPLE_RATE
+    
     audio_duration = len(audio_data) / sample_rate
     logger.info(f"Аудио: {audio_duration:.2f}s, sample_rate={sample_rate}")
     
@@ -370,6 +398,12 @@ async def run_sustained_benchmark(
             audio_data = audio_data.astype(np.float32) / 32768.0
         else:
             audio_data = audio_data.astype(np.float32)
+    
+    # Ресемплинг до целевого sample rate
+    if sample_rate != TARGET_SAMPLE_RATE:
+        logger.info(f"Ресемплинг: {sample_rate}Hz -> {TARGET_SAMPLE_RATE}Hz")
+        audio_data = resample_audio(audio_data, sample_rate, TARGET_SAMPLE_RATE)
+        sample_rate = TARGET_SAMPLE_RATE
     
     audio_duration = len(audio_data) / sample_rate
     logger.info(f"Аудио: {audio_duration:.2f}s, sample_rate={sample_rate}")

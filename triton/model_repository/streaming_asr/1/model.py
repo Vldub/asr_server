@@ -106,12 +106,13 @@ class TritonPythonModel:
             "cache_last_channel_len": cache_last_channel_len,
             "previous_hypotheses": None,
             "pred_out_stream": None,
-            "audio_buffer": np.array([], dtype=np.float32),
+            "audio_buffer": np.array([], dtype=np.float32),  # Буфер для streaming
+            "full_audio": np.array([], dtype=np.float32),    # Всё аудио для batch финализации
             "full_transcription": "",
         }
     
     def _transcribe_chunk(self, audio, state):
-        """Транскрибирует аудио чанк для одной sequence."""
+        """Транскрибирует аудио чанк для одной sequence (streaming mode)."""
         from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
         
         audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(
@@ -161,6 +162,30 @@ class TritonPythonModel:
         state["full_transcription"] = text
         return text, state
     
+    def _transcribe_batch(self, audio):
+        """Транскрибирует аудио целиком (batch mode) - лучшее качество."""
+        audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(
+            device=self.device, dtype=torch.float32
+        )
+        audio_lengths = torch.tensor([len(audio)], device=self.device)
+        
+        with torch.inference_mode():
+            # Используем полный transcribe для лучшего качества
+            hypotheses = self.asr_model.transcribe(
+                audio=[audio],
+                batch_size=1,
+                return_hypotheses=True,
+                verbose=False
+            )
+        
+        if hypotheses and len(hypotheses) > 0:
+            if hasattr(hypotheses[0], 'text'):
+                return hypotheses[0].text
+            elif isinstance(hypotheses[0], str):
+                return hypotheses[0]
+        
+        return ""
+    
     def _process_single_request(self, request):
         """Обрабатывает один запрос."""
         # Получаем аудио
@@ -179,26 +204,37 @@ class TritonPythonModel:
             logger.info(f"Новая сессия: {sequence_id}")
         
         state = self.sequence_states[sequence_id]
+        
+        # Накапливаем аудио в оба буфера
         state["audio_buffer"] = np.concatenate([state["audio_buffer"], audio_data])
+        state["full_audio"] = np.concatenate([state["full_audio"], audio_data])
         
         buffer_samples = len(state["audio_buffer"])
         buffer_ms = buffer_samples * 1000 / self.sample_rate
         
-        # Транскрибируем если накопился достаточный буфер или это конец
-        if buffer_samples >= self.min_chunk_samples or sequence_end:
+        # Промежуточная транскрипция через streaming mode
+        if buffer_samples >= self.min_chunk_samples and not sequence_end:
             if buffer_samples > 0:
-                logger.debug(f"Транскрибирую буфер {buffer_ms:.0f}ms ({buffer_samples} samples)")
+                logger.debug(f"Streaming транскрипция: {buffer_ms:.0f}ms ({buffer_samples} samples)")
                 transcription, state = self._transcribe_chunk(state["audio_buffer"], state)
                 state["audio_buffer"] = np.array([], dtype=np.float32)
-        else:
+        elif not sequence_end:
             # Буфер ещё накапливается - возвращаем последнюю транскрипцию
             transcription = state["full_transcription"]
             logger.debug(f"Накопление буфера: {buffer_ms:.0f}ms / {self.min_chunk_samples * 1000 / self.sample_rate:.0f}ms")
+        else:
+            transcription = state["full_transcription"]
         
-        # Завершение sequence
+        # Завершение sequence - используем batch mode для лучшего качества
         is_final = False
         if sequence_end:
-            transcription = state["full_transcription"]
+            full_audio = state["full_audio"]
+            full_duration = len(full_audio) / self.sample_rate
+            logger.info(f"Финальная batch транскрипция: {full_duration:.2f}s ({len(full_audio)} samples)")
+            
+            # Batch транскрипция всего аудио для лучшего качества
+            transcription = self._transcribe_batch(full_audio)
+            
             del self.sequence_states[sequence_id]
             logger.info(f"Сессия завершена: {sequence_id}")
             is_final = True

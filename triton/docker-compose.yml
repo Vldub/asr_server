@@ -84,7 +84,7 @@ services:
       # Model repository для обновления config без пересборки
       - ./model_repository/streaming_asr:/models/streaming_asr:ro
       # NeMo модель
-      - /home/vlad/Загрузки/Speech_To_Text_Finetuning.nemo:/models/model.nemo:ro
+      - /home/vlad/Загрузки/Speech_To_Text_Finetuning_0.1.nemo:/models/model.nemo:ro
       # Кэш для ускорения загрузки
       - ~/.cache:/root/.cache
     

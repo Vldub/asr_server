@@ -14,6 +14,22 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+# Целевой sample rate для модели ASR
+TARGET_SAMPLE_RATE = 16000
+
+
+def resample_audio(audio_data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Ресемплинг аудио с помощью линейной интерполяции."""
+    if orig_sr == target_sr:
+        return audio_data
+    
+    duration = len(audio_data) / orig_sr
+    new_length = int(duration * target_sr)
+    old_indices = np.linspace(0, len(audio_data) - 1, new_length)
+    new_audio = np.interp(old_indices, np.arange(len(audio_data)), audio_data)
+    
+    return new_audio.astype(np.float32)
+
 
 async def demo_streaming(server_url: str, audio_file: str, chunk_size_ms: int = 100):
     """Демонстрация streaming с выводом в реальном времени."""
@@ -31,6 +47,12 @@ async def demo_streaming(server_url: str, audio_file: str, chunk_size_ms: int = 
             audio_data = audio_data.astype(np.float32) / 32768.0
         else:
             audio_data = audio_data.astype(np.float32)
+    
+    # Ресемплинг до целевого sample rate
+    if sample_rate != TARGET_SAMPLE_RATE:
+        print(f"🔄 Ресемплинг: {sample_rate}Hz -> {TARGET_SAMPLE_RATE}Hz")
+        audio_data = resample_audio(audio_data, sample_rate, TARGET_SAMPLE_RATE)
+        sample_rate = TARGET_SAMPLE_RATE
     
     audio_duration = len(audio_data) / sample_rate
     chunk_size_samples = int((chunk_size_ms / 1000.0) * sample_rate)
@@ -139,5 +161,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
