@@ -19,16 +19,26 @@ TARGET_SAMPLE_RATE = 16000
 
 
 def resample_audio(audio_data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Ресемплинг аудио с помощью линейной интерполяции."""
+    """Ресемплинг аудио с помощью polyphase filter (лучшее качество для ASR)."""
     if orig_sr == target_sr:
         return audio_data
     
-    duration = len(audio_data) / orig_sr
-    new_length = int(duration * target_sr)
-    old_indices = np.linspace(0, len(audio_data) - 1, new_length)
-    new_audio = np.interp(old_indices, np.arange(len(audio_data)), audio_data)
-    
-    return new_audio.astype(np.float32)
+    try:
+        from scipy.signal import resample_poly
+        import math
+        # Polyphase filter - лучшее качество для ASR (без FFT артефактов)
+        gcd = math.gcd(target_sr, orig_sr)
+        up = target_sr // gcd
+        down = orig_sr // gcd
+        new_audio = resample_poly(audio_data, up, down)
+        return new_audio.astype(np.float32)
+    except ImportError:
+        # Fallback на линейную интерполяцию
+        duration = len(audio_data) / orig_sr
+        new_length = int(duration * target_sr)
+        old_indices = np.linspace(0, len(audio_data) - 1, new_length)
+        new_audio = np.interp(old_indices, np.arange(len(audio_data)), audio_data)
+        return new_audio.astype(np.float32)
 
 
 async def demo_streaming(server_url: str, audio_file: str, chunk_size_ms: int = 100):

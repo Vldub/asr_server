@@ -26,15 +26,18 @@ import soundfile as sf
 TARGET_SAMPLE_RATE = 16000
 
 def resample_audio(audio_data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Ресемплинг аудио с помощью scipy (качественный) или интерполяции (fallback)."""
+    """Ресемплинг аудио с помощью polyphase filter (лучшее качество для ASR)."""
     if orig_sr == target_sr:
         return audio_data
     
     try:
-        from scipy import signal
-        # Качественный ресемплинг через scipy
-        new_length = int(len(audio_data) * target_sr / orig_sr)
-        new_audio = signal.resample(audio_data, new_length)
+        from scipy.signal import resample_poly
+        import math
+        # Polyphase filter - лучшее качество для ASR (без FFT артефактов)
+        gcd = math.gcd(target_sr, orig_sr)
+        up = target_sr // gcd
+        down = orig_sr // gcd
+        new_audio = resample_poly(audio_data, up, down)
         return new_audio.astype(np.float32)
     except ImportError:
         # Fallback на линейную интерполяцию
